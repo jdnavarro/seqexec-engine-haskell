@@ -1,8 +1,10 @@
 module Main where
 
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Chan
 import Data.Foldable (traverse_)
-import Control.Concurrent.Async (concurrently)
+
+import Control.Concurrent.Async -- (concurrently)
 
 type Sequence = [Step]
 
@@ -14,6 +16,11 @@ newtype Observation = Observation (IO Result)
 
 data Result = Done
             | Error
+              deriving (Show)
+
+data Event = Configured
+           | Observed
+             deriving (Show)
 
 sequence1 :: Sequence
 sequence1 = [
@@ -30,15 +37,23 @@ sequence1 = [
                            putStrLn "Completion: observation for step 1"
                            return Done)]
 
-execute :: Sequence -> IO ()
-execute = traverse_ step
+execute :: Chan Event -> Sequence -> IO ()
+execute chan = traverse_ step
   where
     step :: Step -> IO ()
     step (Step (TcsConfig tcs) (InstConfig inst) (Observation obsv)) = do
-        (_tcsResult, _instResult) <- concurrently tcs inst
-        _obsvResult <- obsv
+        (tr, ir) <- concurrently tcs inst
+        case (tr, ir) of
+             (Done, Done) -> writeChan chan Configured
+             _            -> error "unhandled error in either TCS or Instrument"
+        obr <- obsv
+        case obr of
+             Done -> writeChan chan Observed
+             _    -> error "unhandled error in observation"
         return ()
 
 main :: IO ()
-main = do execute sequence1
-          putStrLn "Done"
+main = do
+  chan <- newChan
+  execute chan sequence1
+  putStrLn "Sequence completed"
