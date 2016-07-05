@@ -1,34 +1,44 @@
 module Main where
 
 import Control.Concurrent (threadDelay)
-import Data.Foldable (sequenceA_)
-import Control.Concurrent.Async (Concurrently(..), runConcurrently)
+import Data.Foldable (traverse_)
+import Control.Concurrent.Async (concurrently)
 
-type Action = [[IO ()]]
+type Sequence = [Step]
 
-step1 :: Action
-step1 =
-  [ [ do putStrLn "Start: TCS configuration for step 1"
-         threadDelay(2000000)
-         putStrLn "Completion: TCS configuration for step 1"
-    ]
-  , [ do putStrLn "Start: instrument configuration for step 1"
-         threadDelay(2000000)
-         putStrLn "Completion: instrument configuration for step 1"
-    , do putStrLn "Start: observation for step 1"
-         threadDelay(2000000)
-         putStrLn "Completion: observation for step 1"
-    ]
-  ]
+data Step = Step TcsConfig InstConfig Observation
 
-execute :: Action -> IO ()
-execute []          = pure ()
-execute ([]:sios)   = execute sios
-execute ([io]:sios) = io *> execute sios
-execute (pios:sios) = concurrent pios *> execute sios
+newtype TcsConfig   = TcsConfig   (IO Result)
+newtype InstConfig  = InstConfig  (IO Result)
+newtype Observation = Observation (IO Result)
+
+data Result = Done
+            | Error
+
+sequence1 :: Sequence
+sequence1 = [
+    Step (TcsConfig   $ do putStrLn "Start: TCS configuration for step 1"
+                           threadDelay(2000000)
+                           putStrLn "Completion: TCS configuration for step 1"
+                           return Done)
+         (InstConfig  $ do putStrLn "Start: instrument configuration for step 1"
+                           threadDelay(2000000)
+                           putStrLn "Completion: instrument configuration for step 1"
+                           return Done)
+         (Observation $ do putStrLn "Start: observation for step 1"
+                           threadDelay(2000000)
+                           putStrLn "Completion: observation for step 1"
+                           return Done)]
+
+execute :: Sequence -> IO ()
+execute = traverse_ step
   where
-    concurrent = runConcurrently . sequenceA_ . fmap Concurrently
+    step :: Step -> IO ()
+    step (Step (TcsConfig tcs) (InstConfig inst) (Observation obsv)) = do
+        (_tcsResult, _instResult) <- concurrently tcs inst
+        _obsvResult <- obsv
+        return ()
 
 main :: IO ()
-main = do execute step1
+main = do execute sequence1
           putStrLn "Done"
