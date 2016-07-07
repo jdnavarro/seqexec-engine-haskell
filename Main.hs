@@ -1,7 +1,7 @@
 module Main where
 
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Chan
+import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Data.Foldable (traverse_)
 
 import Control.Concurrent.Async -- (concurrently)
@@ -14,33 +14,13 @@ newtype TcsConfig   = TcsConfig   (IO Result)
 newtype InstConfig  = InstConfig  (IO Result)
 newtype Observation = Observation (IO Result)
 
-data Result = Done
-            | Error
-              deriving (Show)
+data Result = Done | Error deriving (Show)
 
-data Event = Configured
-           | Observed
-             deriving (Show)
-
-sequence1 :: Sequence
-sequence1 = [
-    Step (TcsConfig   $ do putStrLn "Start: TCS configuration for step 1"
-                           threadDelay(2000000)
-                           putStrLn "Completion: TCS configuration for step 1"
-                           return Done)
-         (InstConfig  $ do putStrLn "Start: instrument configuration for step 1"
-                           threadDelay(2000000)
-                           putStrLn "Completion: instrument configuration for step 1"
-                           return Done)
-         (Observation $ do putStrLn "Start: observation for step 1"
-                           threadDelay(2000000)
-                           putStrLn "Completion: observation for step 1"
-                           return Done)]
+data Event = Configured | Observed | Completed deriving (Show)
 
 execute :: Chan Event -> Sequence -> IO ()
 execute chan = traverse_ step
   where
-    step :: Step -> IO ()
     step (Step (TcsConfig tcs) (InstConfig inst) (Observation obsv)) = do
         (tr, ir) <- concurrently tcs inst
         case (tr, ir) of
@@ -50,10 +30,43 @@ execute chan = traverse_ step
         case obr of
              Done -> writeChan chan Observed
              _    -> error "unhandled error in observation"
-        return ()
+        -- Poison pill
+        writeChan chan Completed
+
+data Status = Idle
+            | Running
+            | Failed
+              deriving (Show)
+
+handler :: Chan Event -> IO ()
+handler chan = handle Idle
+  where
+    handle Idle = putStrLn "Output: Starting sequence" *> handle Running
+    handle Running = do
+      ev <- readChan chan
+      case ev of
+        Configured -> putStrLn "Output: TCS and Instrument configured" *> handle Running
+        Observed   -> putStrLn "Output: Observation completed" *>  handle Running
+        Completed  -> putStrLn "Output: Sequence completed"
+    handle Failed = error "Unimplemented"
+
+sequence1 :: Sequence
+sequence1 = [
+    Step (TcsConfig   $ do putStrLn "System: Start TCS configuration for step 1"
+                           threadDelay(2000000)
+                           putStrLn "System: Complete TCS configuration for step 1"
+                           return Done)
+         (InstConfig  $ do putStrLn "System: Start instrument configuration for step 1"
+                           threadDelay(2000000)
+                           putStrLn "System: Complete instrument configuration for step 1"
+                           return Done)
+         (Observation $ do putStrLn "System: Start observation for step 1"
+                           threadDelay(2000000)
+                           putStrLn "System: Stop observation for step 1"
+                           return Done)]
 
 main :: IO ()
 main = do
   chan <- newChan
-  execute chan sequence1
-  putStrLn "Sequence completed"
+  _ <- concurrently (execute chan sequence1) (handler chan)
+  putStrLn "Bye"
