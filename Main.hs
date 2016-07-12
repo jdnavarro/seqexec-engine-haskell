@@ -4,7 +4,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Data.Foldable (traverse_)
 
-import Control.Concurrent.Async -- (concurrently)
+import Control.Concurrent.Async (concurrently)
 
 type Sequence = [Step]
 
@@ -38,35 +38,35 @@ data Status = Idle
             | Failed
               deriving (Show)
 
-handler :: Chan Event -> IO ()
-handler chan = handle Idle
+handle :: Chan Event -> IO ()
+handle chan = go Idle
   where
-    handle Idle = putStrLn "Output: Starting sequence" *> handle Running
-    handle Running = do
+    go Idle = putStrLn "Output: Starting sequence" *> go Running
+    go Failed = error "Unimplemented"
+    go Running = do
       ev <- readChan chan
       case ev of
-        Configured -> putStrLn "Output: TCS and Instrument configured" *> handle Running
-        Observed   -> putStrLn "Output: Observation completed" *>  handle Running
+        Configured -> putStrLn "Output: TCS and Instrument configured" *> go Running
+        Observed   -> putStrLn "Output: Observation completed" *> go Running
         Completed  -> putStrLn "Output: Sequence completed"
-    handle Failed = error "Unimplemented"
 
 sequence1 :: Sequence
 sequence1 = [
     Step (TcsConfig   $ do putStrLn "System: Start TCS configuration for step 1"
-                           threadDelay(2000000)
+                           threadDelay 2000000
                            putStrLn "System: Complete TCS configuration for step 1"
                            return Done)
          (InstConfig  $ do putStrLn "System: Start instrument configuration for step 1"
-                           threadDelay(2000000)
+                           threadDelay 2000000
                            putStrLn "System: Complete instrument configuration for step 1"
                            return Done)
          (Observation $ do putStrLn "System: Start observation for step 1"
-                           threadDelay(2000000)
+                           threadDelay 2000000
                            putStrLn "System: Stop observation for step 1"
                            return Done)]
 
 main :: IO ()
 main = do
   chan <- newChan
-  _ <- concurrently (execute chan sequence1) (handler chan)
+  _ <- concurrently (execute chan sequence1) (handle chan)
   putStrLn "Bye"
