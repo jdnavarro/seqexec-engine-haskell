@@ -11,6 +11,7 @@ import System.IO (BufferMode(NoBuffering), hSetBuffering, stdin)
 import Control.Concurrent.Async (concurrently)
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.Reader
+import Control.Monad.Trans.State
 
 type Sequence = [Step]
 
@@ -56,13 +57,7 @@ data Status = Idling
             | Finishing
               deriving (Show)
 
-type Telescope r = ReaderT (MVar Status) IO r
-
-switch :: Status -> Telescope ()
-switch st = ask >>= lift . flip modifyMVar_ (const $ pure st)
-
-status :: Telescope Status
-status = ask >>= lift . readMVar
+type Semaphore = MVar ()
 
 pausing :: Event
 pausing = EventUser Pausing
@@ -70,32 +65,38 @@ pausing = EventUser Pausing
 resuming :: Event
 resuming = EventUser Resuming
 
-execute :: Chan Event -> Sequence -> Telescope ()
+execute :: Chan Event -> Sequence -> ReaderT Semaphore IO ()
 execute chan = traverse_ step
   where
-    step (Step (TcsConfig tcs) (InstConfig inst) (Observation obsv)) =
-        status >>= \case
-          Waiting -> error "Not implemented yet"
-          _ -> do
-            (tr, ir) <- lift $ concurrently tcs inst
-            case (tr, ir) of
-                (Done, Done) -> lift $ writeChan chan configured
-                _            -> error "unhandled error in either TCS or Instrument"
-            obr <- lift obsv
-            case obr of
-                Done -> lift $ writeChan chan observed
-                _    -> error "unhandled error in observation"
-            lift $ writeChan chan completed
+    step :: Step -> ReaderT Semaphore IO ()
+    step (Step (TcsConfig tcs) (InstConfig inst) (Observation obsv)) = do
+      red
+      (tr, ir) <- lift $ concurrently tcs inst
+      case (tr, ir) of
+          (Done, Done) -> lift $ writeChan chan configured
+          _            -> error "unhandled error in either TCS or Instrument"
+      green
+      red
+      lift obsv >>= \case
+          Done -> lift $ writeChan chan observed
+          _    -> error "unhandled error in observation"
+      lift $ writeChan chan completed
+      green
 
-handle :: Chan Event -> Telescope ()
-handle chan = status >>= \case
+    -- Acquire the lock
+    red = ask >>= lift . takeMVar
+    -- Release the lock
+    green = ask >>= lift . flip putMVar ()
+
+handle :: Chan Event -> Semaphore -> StateT Status IO ()
+handle chan semaphore = get >>= \case
     Finishing -> lift $ putStrLn "Done"
-    st -> go st *> handle chan
+    st -> go st *> handle chan semaphore
   where
     go = \case
       Idling  -> do
         lift $ putStrLn "Output: Starting sequence"
-        switch Running
+        put Running
       Failing -> error "Unimplemented"
       Waiting -> do
         lift $ putStrLn "Output: Waiting for commands"
@@ -104,39 +105,39 @@ handle chan = status >>= \case
             case es of
               Configured -> do
                 lift $ putStrLn "Output: TCS and Instrument configured, paused."
-                switch Waiting
+                put Waiting
               Observed   -> do
                 lift $ putStrLn "Output: Observation completed, paused"
-                switch Waiting
+                put Waiting
               Completed  -> lift $ putStrLn "Output: Step completed"
           EventUser ue ->
             case ue of
               Pausing    -> do
                 lift $ putStrLn "Output: Already paused"
-                switch Waiting
+                put Waiting
               Resuming   -> do
                 lift $ putStrLn "Output: Resuming..."
-                switch Running
+                lift $ putMVar semaphore ()
+                put Running
       Running ->
         lift (readChan chan) >>= \case
           EventSystem es ->
             case es of
               Configured -> do lift $ putStrLn "Output: TCS and Instrument configured, continuing..."
-                               switch Running
+                               put Running
               Observed   -> do lift $ putStrLn "Output: Observation completed, continuing..."
-                               switch Running
+                               put Running
               Completed  -> lift $ putStrLn "Output: Step completed, continuing..."
           EventUser ue ->
             case ue of
               Pausing    -> do lift $ putStrLn "Output: Pausing..."
-                               switch Waiting
+                               lift $ takeMVar semaphore
+                               put Waiting
               Resuming   -> do lift $ putStrLn "Output: Already resumed"
-                               switch Running
+                               put Running
 
 input :: Chan Event -> IO ()
-input chan = forever $ do
-  ic <- getChar
-  case ic of
+input chan = forever $ getChar >>= \case
     'p' -> writeChan chan pausing
     'r' -> writeChan chan resuming
     _   -> return ()
@@ -160,9 +161,9 @@ main :: IO ()
 main = do
   hSetBuffering stdin NoBuffering
   chan <- newChan
-  st0 <- newMVar Idling
+  semaphore <- newMVar ()
   _ <- forkIO $ input chan
   let sequence0 = concatMap mkSequence [1..3]
-  _ <- concurrently (runReaderT (execute chan sequence0) st0)
-                    (runReaderT (handle chan) st0)
+  _ <- concurrently (runReaderT (execute chan sequence0) semaphore)
+                    (execStateT (handle chan semaphore) Idling)
   putStrLn "Bye"
