@@ -13,23 +13,24 @@ import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.State (StateT, execStateT, get, gets, put, modify)
 import Control.Monad.Trans.Reader (ReaderT(runReaderT), ask)
 
-type Sequence = [[Action]]
+type Sequence = [Step]
+
+type Step = [Action]
 
 type Action = IO Result
 
-data Status = Running
-            | Waiting
-            deriving (Show)
+data Status = Running | Waiting deriving (Show)
 
 type SeqStatus = (Sequence, Status)
 
-data Result = Done | Error deriving (Show)
+data Result = Done | Error deriving (Eq, Show)
 
-data Event = Pause
-           | Start
+data Event = Start
+           | Pause
            | Completed -- Action completed
            | Failed    -- Action failed
            | Synced    -- Parallel actions completed
+           | SyncFailed
            | Finished
            deriving (Show)
 
@@ -54,66 +55,69 @@ observe = do
     putStrLn "System: Complete observation"
     return Done
 
-input :: Chan Event -> IO r
-input chan = forever $ getChar >>= \case
-    'p' -> writeChan chan Pause
-    's' -> writeChan chan Start
-    _   -> return ()
-
--- * Executor
-
 type Telescope r = StateT SeqStatus (ReaderT (Chan Event) IO) r
 
 handler :: Telescope r
 handler = forever $ receive >>= \case
-    Start -> log "Output: Starting" *> switch Running *> execute
+    Start -> log "Output: Started" *> switch Running *> run
     Pause -> log "Output: Paused" *> switch Waiting
     Completed -> log "Output: Action completed"
     Failed -> log "Output: Action failed"
-    Synced -> log "Output: Parallel actions completed" *> execute
+    Synced -> log "Output: Parallel actions completed" *> run
+    SyncFailed -> log "Output: One of the actions failed, repeating..."
     Finished -> log "Output: Finished" *> switch Waiting
 
-log :: String -> Telescope ()
-log = lift . lift . putStrLn
-
-receive :: Telescope Event
-receive = lift ask
-      >>= lift . lift . readChan
-
-send :: Event -> Telescope ()
-send ev = lift ask
-      >>= lift . lift . flip writeChan ev
-
-execute :: Telescope ()
-execute = status >>= \case
-    Running -> go
-    Waiting -> return ()
-  where
-    go :: Telescope ()
-    go = do
-        actions <- pop
+run :: Telescope ()
+run = status >>= \case
+    Running -> do
+        actions <- step
         chan <- lift ask
-        _ <- lift . lift $ mapConcurrently (exe chan) actions
-        send Synced
+        rs <- lift . lift $ mapConcurrently (execute chan) actions
+        if all (== Done) rs
+           then remove *> send Synced
+           else send SyncFailed
       where
-        exe chan action = do
+        execute chan action = do
             r <- action
             case r of
-              Done  -> writeChan chan Completed
-              Error -> writeChan chan Failed
-
-pop :: Telescope [Action]
-pop = do
-    (seq', st) <- get
-    case seq' of
-         (x:xs) -> put (xs, st) *> return x
-         [] -> send Finished *> return []
+              Done  -> writeChan chan Completed *> action
+              Error -> writeChan chan Failed *> action
+    Waiting -> return ()
 
 switch :: Status -> Telescope ()
 switch = modify . second . const
 
 status :: Telescope Status
 status = gets snd
+
+log :: String -> Telescope ()
+log = lift . lift . putStrLn
+
+send :: Event -> Telescope ()
+send ev = lift ask >>= lift . lift . flip writeChan ev
+
+receive :: Telescope Event
+receive = lift ask >>= lift . lift . readChan
+
+step :: Telescope Step
+step = do
+    (seq', _) <- get
+    case seq' of
+         (x:_) -> return x
+         [] -> send Finished *> return []
+
+remove :: Telescope ()
+remove = do
+    (seq', st) <- get
+    case seq' of
+         (_:xs) -> put (xs, st)
+         [] -> return ()
+
+input :: Chan Event -> IO r
+input chan = forever $ getChar >>= \case
+    'p' -> writeChan chan Pause
+    's' -> writeChan chan Start
+    _   -> return ()
 
 sequence0 :: Sequence
 sequence0 = [
